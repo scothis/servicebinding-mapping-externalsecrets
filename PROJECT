@@ -1,0 +1,19 @@
+domain: x-mapping.servicebinding.io
+layout:
+- go.kubebuilder.io/v3
+multigroup: true
+projectName: servicebinding-externalsecrets-mapping
+repo: github.com/servicebinding/mapping-externalsecrets
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: x-mapping.servicebinding.io
+  kind: ExternalSecretMapping
+  path: github.com/servicebinding/mapping-externalsecrets/apis/v1alpha1
+  version: v1alpha1
+  webhooks:
+    validation: true
+    webhookVersion: v1
+version: "3"

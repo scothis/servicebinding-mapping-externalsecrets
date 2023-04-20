@@ -1,0 +1,53 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  creationTimestamp: null
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - x-mapping.servicebinding.io
+  resources:
+  - externalsecretmappings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - x-mapping.servicebinding.io
+  resources:
+  - externalsecretmappings/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - x-mapping.servicebinding.io
+  resources:
+  - externalsecretmappings/status
+  verbs:
+  - get
+  - patch
+  - update

@@ -1,0 +1,463 @@
+name: CI
+
+on:
+  push:
+    branches:
+    - '**'
+    - '!dependabot/**'
+    tags:
+    # semver tags
+    - 'v[0-9]+\.[0-9]+\.[0-9]+-?**'
+  pull_request: {}
+
+env:
+  IMGPKG: go run -modfile hack/imgpkg/go.mod github.com/vmware-tanzu/carvel-imgpkg/cmd/imgpkg
+  KAPP: go run -modfile hack/kapp/go.mod github.com/k14s/kapp/cmd/kapp
+  KBLD: go run -modfile hack/kbld/go.mod github.com/vmware-tanzu/carvel-kbld/cmd/kbld
+  KO: go run -modfile hack/ko/go.mod github.com/google/ko
+
+jobs:
+
+  unit:
+    name: Unit Test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/setup-go@v4
+      with:
+        go-version: 1.19.x
+    - uses: actions/checkout@v3
+    - name: Test
+      run: make test
+    - name: Report coverage
+      uses: codecov/codecov-action@v3
+    - name: Disallow generated drift
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        git diff --exit-code .
+
+  stage:
+    name: Stage
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY_NAME: registry.local
+      KO_DOCKER_REPO: registry.local/servicebinding
+      KO_PLATFORMS: linux/amd64,linux/arm64
+      BUNDLE: registry.local/servicebinding/bundle
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-go@v4
+      with:
+        go-version: 1.19.x
+    - name: Generate certs
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        CERT_DIR=$(mktemp -d -t certs.XXXX)
+        echo "CERT_DIR=$CERT_DIR" >> $GITHUB_ENV
+
+        echo "##[group]Install cfssl"
+          curl -L https://github.com/cloudflare/cfssl/releases/download/v1.6.1/cfssl_1.6.1_linux_amd64 -o cfssl
+          curl -L https://github.com/cloudflare/cfssl/releases/download/v1.6.1/cfssljson_1.6.1_linux_amd64 -o cfssljson
+          chmod +x cfssl*
+          sudo mv cfssl* /usr/local/bin
+        echo "##[endgroup]"
+
+        echo "##[group]Generate CA"
+          cfssl gencert -initca .github/tls/root-csr.json \
+            | cfssljson -bare ${CERT_DIR}/root-ca
+          cfssl gencert -ca ${CERT_DIR}/root-ca.pem -ca-key ${CERT_DIR}/root-ca-key.pem \
+            -config=".github/tls/config.json" \
+            -profile="intermediate" .github/tls/intermediate-csr.json \
+            | cfssljson -bare ${CERT_DIR}/signing-ca
+          cat ${CERT_DIR}/signing-ca.pem ${CERT_DIR}/root-ca.pem > ${CERT_DIR}/ca.pem
+        echo "##[endgroup]"
+        echo "##[group]Install CA"
+          # https://ubuntu.com/server/docs/security-trust-store
+          sudo apt-get install -y ca-certificates
+          sudo cp ${CERT_DIR}/ca.pem /usr/local/share/ca-certificates/ca.crt
+          sudo update-ca-certificates
+        echo "##[endgroup]"
+
+        echo "##[group]Generate cert"
+          cfssl gencert -ca ${CERT_DIR}/signing-ca.pem -ca-key ${CERT_DIR}/signing-ca-key.pem \
+            -config=".github/tls/config.json" \
+            -profile="server" \
+            -hostname="${REGISTRY_NAME},local-registry" \
+            .github/tls/server-csr.json \
+            | cfssljson -bare ${CERT_DIR}/server
+        echo "##[endgroup]"
+
+    - name: Setup local registry
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        # Run a registry.
+        docker run -d \
+          --restart=always \
+          --name local-registry \
+          -v ${CERT_DIR}:/certs \
+          -e REGISTRY_HTTP_ADDR=0.0.0.0:443 \
+          -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/server.pem \
+          -e REGISTRY_HTTP_TLS_KEY=/certs/server-key.pem \
+          -p "443:443" \
+          registry:2
+
+        # Make the $REGISTRY_NAME -> local-registry
+        echo "$(hostname -I | cut -d' ' -f1) $REGISTRY_NAME" | sudo tee -a /etc/hosts
+    - name: Build all platforms for tags
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        echo "KO_PLATFORMS=all" >> $GITHUB_ENV
+    - name: Build
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        scratch=$(mktemp -d -t bundle.XXXX)
+        mkdir -p "${scratch}/.imgpkg"
+        mkdir -p "${scratch}/config"
+
+        cp LICENSE "${scratch}/LICENSE"
+
+        echo "##[group]Build"
+          cat hack/boilerplate.yaml.txt > "${scratch}/config/mapping-externalsecrets.yaml"
+          ${KO} resolve --platform ${KO_PLATFORMS} -f config/mapping-externalsecrets.yaml >> "${scratch}/config/mapping-externalsecrets.yaml"
+
+          ${KBLD} --imgpkg-lock-output "${scratch}/.imgpkg/images.yml" \
+            -f "${scratch}/config/mapping-externalsecrets.yaml" \
+            > /dev/null
+        echo "##[endgroup]"
+
+        echo "##[group]Create bundle"
+          ${IMGPKG} push -f "${scratch}" -b "${BUNDLE}"
+          ${IMGPKG} copy -b "${BUNDLE}" --to-tar mapping-externalsecrets-bundle.tar
+        echo "##[endgroup]"
+    - uses: actions/upload-artifact@v3
+      with:
+        name: mapping-externalsecrets-bundle.tar
+        path: mapping-externalsecrets-bundle.tar
+        retention-days: 7
+
+  acceptance:
+    name: Acceptance Test
+    needs: stage
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - node: kindest/node:v1.17.17@sha256:e477ee64df5731aa4ef4deabbafc34e8d9a686b49178f726563598344a3898d5
+          os: ubuntu-20.04
+        - node: kindest/node:v1.18.20@sha256:61c9e1698c1cb19c3b1d8151a9135b379657aee23c59bde4a8d87923fcb43a91
+          os: ubuntu-20.04
+        - node: kindest/node:v1.19.16@sha256:476cb3269232888437b61deca013832fee41f9f074f9bed79f57e4280f7c48b7
+          os: ubuntu-latest
+        - node: kindest/node:v1.20.15@sha256:a32bf55309294120616886b5338f95dd98a2f7231519c7dedcec32ba29699394
+          os: ubuntu-latest
+        - node: kindest/node:v1.21.14@sha256:9d9eb5fb26b4fbc0c6d95fa8c790414f9750dd583f5d7cee45d92e8c26670aa1
+          os: ubuntu-latest
+        - node: kindest/node:v1.22.15@sha256:7d9708c4b0873f0fe2e171e2b1b7f45ae89482617778c1c875f1053d4cef2e41
+          os: ubuntu-latest
+        - node: kindest/node:v1.23.13@sha256:ef453bb7c79f0e3caba88d2067d4196f427794086a7d0df8df4f019d5e336b61
+          os: ubuntu-latest
+        - node: kindest/node:v1.24.7@sha256:577c630ce8e509131eab1aea12c022190978dd2f745aac5eb1fe65c0807eb315
+          os: ubuntu-latest
+        - node: kindest/node:v1.25.3@sha256:f52781bc0d7a19fb6c405c2af83abfeb311f130707a0e219175677e366cc45d1
+          os: ubuntu-latest
+        - node: kindest/node:v1.26.0@sha256:691e24bd2417609db7e589e1a479b902d2e209892a10ce375fab60a8407c7352
+          os: ubuntu-latest
+        - node: kindest/node:v1.27.0@sha256:c6b22e613523b1af67d4bc8a0c38a4c3ea3a2b8fbc5b367ae36345c9cb844518
+          os: ubuntu-latest
+    env:
+      REGISTRY_NAME: registry.local
+      BUNDLE: registry.local/bundle
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-go@v4
+      with:
+        go-version: 1.19.x
+    - uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    - name: Install kind
+      run: |
+        cd $(mktemp -d -t kind.XXXX)
+        curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.17.0/kind-$(go env GOHOSTOS)-$(go env GOHOSTARCH)
+        chmod +x ./kind
+        sudo mv ./kind /usr/local/bin
+        cd -
+    - name: Generate certs
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        CERT_DIR=$(mktemp -d -t certs.XXXX)
+        echo "CERT_DIR=$CERT_DIR" >> $GITHUB_ENV
+
+        echo "##[group]Install cfssl"
+          curl -L https://github.com/cloudflare/cfssl/releases/download/v1.6.1/cfssl_1.6.1_linux_amd64 -o cfssl
+          curl -L https://github.com/cloudflare/cfssl/releases/download/v1.6.1/cfssljson_1.6.1_linux_amd64 -o cfssljson
+          chmod +x cfssl*
+          sudo mv cfssl* /usr/local/bin
+        echo "##[endgroup]"
+
+        echo "##[group]Generate CA"
+          cfssl gencert -initca .github/tls/root-csr.json \
+            | cfssljson -bare ${CERT_DIR}/root-ca
+          cfssl gencert -ca ${CERT_DIR}/root-ca.pem -ca-key ${CERT_DIR}/root-ca-key.pem \
+            -config=".github/tls/config.json" \
+            -profile="intermediate" .github/tls/intermediate-csr.json \
+            | cfssljson -bare ${CERT_DIR}/signing-ca
+          cat ${CERT_DIR}/signing-ca.pem ${CERT_DIR}/root-ca.pem > ${CERT_DIR}/ca.pem
+        echo "##[endgroup]"
+        echo "##[group]Install CA"
+          # https://ubuntu.com/server/docs/security-trust-store
+          sudo apt-get install -y ca-certificates
+          sudo cp ${CERT_DIR}/ca.pem /usr/local/share/ca-certificates/ca.crt
+          sudo update-ca-certificates
+        echo "##[endgroup]"
+
+        echo "##[group]Generate cert"
+          cfssl gencert -ca ${CERT_DIR}/signing-ca.pem -ca-key ${CERT_DIR}/signing-ca-key.pem \
+            -config=".github/tls/config.json" \
+            -profile="server" \
+            -hostname="${REGISTRY_NAME},local-registry" \
+            .github/tls/server-csr.json \
+            | cfssljson -bare ${CERT_DIR}/server
+        echo "##[endgroup]"
+    - name: Setup local registry
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        # Run a registry.
+        docker run -d \
+          --restart=always \
+          --name local-registry \
+          -v ${CERT_DIR}:/certs \
+          -e REGISTRY_HTTP_ADDR=0.0.0.0:443 \
+          -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/server.pem \
+          -e REGISTRY_HTTP_TLS_KEY=/certs/server-key.pem \
+          -p "443:443" \
+          registry:2
+
+        # Make the $REGISTRY_NAME -> local-registry
+        echo "$(hostname -I | cut -d' ' -f1) $REGISTRY_NAME" | sudo tee -a /etc/hosts
+    - name: Create Cluster
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        # create a cluster with the local registry enabled in containerd
+        cat <<EOF | kind create cluster --config=-
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        containerdConfigPatches:
+        - |-
+          [plugins."io.containerd.grpc.v1.cri".registry.mirrors."${REGISTRY_NAME}"]
+            endpoint = ["https://local-registry"]
+        - |-
+          [plugins."io.containerd.grpc.v1.cri".registry.configs."local-registry".tls]
+            ca_file  = "/etc/docker/certs.d/local-registry/ca.pem"
+        nodes:
+        - role: control-plane
+          image: ${{ matrix.node }}
+          extraMounts:
+          - containerPath: /etc/docker/certs.d/local-registry
+            hostPath: ${CERT_DIR}
+        EOF
+
+        # connect the registry to the cluster network
+        docker network connect kind local-registry
+
+        # Document the local registry
+        # https://github.com/kubernetes/enhancements/tree/master/keps/sig-cluster-lifecycle/generic/1755-communicating-a-local-registry
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: local-registry-hosting
+          namespace: kube-public
+        data:
+          localRegistryHosting.v1: |
+            host: "localhost"
+            help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
+        EOF
+    - name: Download staged bundle
+      uses: actions/download-artifact@v3
+      with:
+        name: mapping-externalsecrets-bundle.tar
+    - name: Relocate bundle
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        ${IMGPKG} copy --tar mapping-externalsecrets-bundle.tar --to-repo "${BUNDLE}"
+        mkdir -p bundle
+        ${IMGPKG} pull -b "${BUNDLE}" -o bundle
+    - name: Deploy
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        echo "##[group]Create namespace"
+          kubectl create ns apps
+        echo "##[endgroup]"
+        echo "##[group]Deploy cert-manager"
+          ${KAPP} deploy -a cert-manager -n apps --wait-timeout 5m -y \
+            -f https://github.com/cert-manager/cert-manager/releases/download/v1.9.1/cert-manager.yaml
+        echo "##[endgroup]"
+        echo "##[group]Deploy external-secrets"
+          ${KAPP} deploy -a external-secrets -n apps --wait-timeout 5m -y \
+            -f https://github.com/external-secrets/external-secrets/releases/download/v0.8.1/external-secrets.yaml
+        echo "##[endgroup]"
+        echo "##[group]Deploy mapping-externalsecrets"
+          ${KAPP} deploy -a mapping-externalsecrets -n apps --wait-timeout 5m -y \
+            -f <(${KBLD} -f bundle/.imgpkg/images.yml -f bundle/config)
+        echo "##[endgroup]"
+    - name: Test
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        # TODO
+
+    - name: Collect diagnostics
+      run: |
+        set +o errexit
+        set -o nounset
+        set +o pipefail
+
+        echo "##[group]kapp list -A"
+          ${KAPP} list -A
+        echo "##[endgroup]"
+        echo "##[group]kubectl describe deployments.apps -n servicebinding-mapping-externalsecrets"
+          kubectl describe deployments.apps -n servicebinding-mapping-externalsecrets
+        echo "##[endgroup]"
+        echo "##[group]kubectl logs -n servicebinding-mapping-externalsecrets -l control-plane=controller-manager --tail 10000"
+          kubectl logs -n servicebinding-mapping-externalsecrets -l control-plane=controller-manager --tail 10000
+        echo "##[endgroup]"
+      if: always()
+      continue-on-error: true
+    - name: Delete Gracefully
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        echo "##[group]Delete mapping-externalsecrets"
+          ${KAPP} delete -a mapping-externalsecrets -n apps --wait-timeout 5m -y
+        echo "##[endgroup]"
+        echo "##[group]Delete external-secrets"
+          ${KAPP} delete -a external-secrets -n apps --wait-timeout 5m -y
+        echo "##[endgroup]"
+        echo "##[group]Delete cert-manager"
+          ${KAPP} delete -a cert-manager -n apps --wait-timeout 5m -y
+        echo "##[endgroup]"
+      if: always()
+    - name: Cleanup cluster
+      run: kind delete cluster
+      if: always()
+
+  # aggregate the unit and acceptance results into a single job
+  test:
+    name: Test
+    needs:
+    - unit
+    - acceptance
+    runs-on: ubuntu-latest
+    steps:
+    - run: echo "it passed"
+
+  release:
+    name: Release
+    needs:
+    - test
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-go@v4
+      with:
+        go-version: 1.19.x
+    - name: Get the version
+      id: get_version
+      run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
+    - name: Draft release
+      id: create_release
+      uses: actions/create-release@v1.1.4
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: ${{ steps.get_version.outputs.VERSION }}
+        draft: true
+    - name: Download staged bundle
+      uses: actions/download-artifact@v3
+      with:
+        name: mapping-externalsecrets-bundle.tar
+    - name: Upload mapping-externalsecrets-bundle.tar
+      uses: actions/upload-release-asset@v1.0.2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: mapping-externalsecrets-bundle.tar
+        asset_name: mapping-externalsecrets-bundle-${{ steps.get_version.outputs.VERSION }}.tar
+        asset_content_type: application/x-tar
+    - name: Install crane
+      run: |
+        cd $(mktemp -d -t crane.XXXX)
+        curl -L https://github.com/google/go-containerregistry/releases/download/v0.9.0/go-containerregistry_Linux_x86_64.tar.gz | tar -xz
+        chmod +x ./crane
+        sudo mv ./crane /usr/local/bin
+        cd -
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Relocate bundle to public registry
+      run: |
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+
+        version=${{ steps.get_version.outputs.VERSION }}
+
+        ${IMGPKG} copy --tar mapping-externalsecrets-bundle.tar --to-repo "ghcr.io/${{ github.repository }}/bundle"
+        crane tag "ghcr.io/${{ github.repository }}/bundle" "${version}"
+        digest=$(crane digest "ghcr.io/${{ github.repository }}/bundle:${version}")
+
+        scratch=$(mktemp -d -t bundle.XXXX)
+        mkdir -p ${scratch}
+        ${IMGPKG} pull -b "ghcr.io/${{ github.repository }}/bundle:${version}@${digest}" -o ${scratch}
+
+        cp hack/boilerplate.yaml.txt mapping-externalsecrets.yaml
+        ${KBLD} -f ${scratch}/config/mapping-externalsecrets.yaml -f ${scratch}/.imgpkg/images.yml \
+          >> mapping-externalsecrets.yaml
+
+    - name: Upload mapping-externalsecrets.yaml
+      uses: actions/upload-release-asset@v1.0.2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: mapping-externalsecrets.yaml
+        asset_name: mapping-externalsecrets-${{ steps.get_version.outputs.VERSION }}.yaml
+        asset_content_type: application/x-yaml
