@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aggregate
+  labels:
+    servicebinding.io/controller: "true" # matches the aggregation rule selector
+rules:
+- apiGroups:
+  - x-mapping.servicebinding.io
+  resources:
+  - externalsecretmappings
+  verbs:
+  - get
+  - list
+  - watch

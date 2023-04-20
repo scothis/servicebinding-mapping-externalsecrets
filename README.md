@@ -5,7 +5,7 @@
 [![CI](https://github.com/servicebinding/mapping-externalsecrets/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/servicebinding/mapping-externalsecrets/actions/workflows/ci.yaml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/servicebinding/mapping-externalsecrets)](https://goreportcard.com/report/github.com/servicebinding/mapping-externalsecrets)
 [![Go Reference](https://pkg.go.dev/badge/github.com/servicebinding/mapping-externalsecrets.svg)](https://pkg.go.dev/github.com/servicebinding/mapping-externalsecrets)
-[![codecov](https://codecov.io/gh/servicebinding/runtime/branch/main/graph/badge.svg?token=D2Hs4MIXBZ)](https://codecov.io/gh/servicebinding/runtime)
+[![codecov](https://codecov.io/gh/servicebinding/mapping-externalsecrets/branch/main/graph/badge.svg?token=D2Hs4MIXBZ)](https://codecov.io/gh/servicebinding/mapping-externalsecrets)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 Reference implementation of the [ServiceBinding.io](https://servicebinding.io) [1.0 spec](https://servicebinding.io/spec/core/1.0.0/). The full specification is implemented, please open an issue for any discrepancies.
