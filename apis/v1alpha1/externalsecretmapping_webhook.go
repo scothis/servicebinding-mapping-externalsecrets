@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"strings"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -60,7 +62,16 @@ func (r *ExternalSecretMapping) ValidateDelete() error {
 func (r *ExternalSecretMapping) validate() field.ErrorList {
 	errs := field.ErrorList{}
 
-	// TODO require an owner reference to an ExternalSecret
+	// require a single owner reference to an ExternalSecret
+	if len(r.OwnerReferences) == 0 {
+		errs = append(errs, field.Required(field.NewPath("metadata", "ownerReferences"), "must be owned by an ExternalSecret"))
+	} else if len(r.OwnerReferences) != 1 {
+		errs = append(errs, field.Invalid(field.NewPath("metadata", "ownerReferences"), r.OwnerReferences, "must be owned by exactly one ExternalSecret"))
+	} else if o := r.OwnerReferences[0]; o.Kind != "ExternalSecret" || !strings.HasPrefix(o.APIVersion, "external-secrets.io/") {
+		errs = append(errs, field.Invalid(field.NewPath("metadata", "ownerReferences").Index(0), r.OwnerReferences, "must be owned by an ExternalSecret"))
+	} else if o.Name != r.Name {
+		errs = append(errs, field.Invalid(field.NewPath("metadata", "ownerReferences").Index(0).Child("name"), o.Name, "owner name must match resource name"))
+	}
 
 	errs = append(errs, r.Spec.validate(field.NewPath("spec"))...)
 

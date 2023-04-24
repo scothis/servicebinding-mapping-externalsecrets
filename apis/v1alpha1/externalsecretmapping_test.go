@@ -20,7 +20,10 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/pointer"
 )
 
 func TestExternalSecretMappingDefault(t *testing.T) {
@@ -54,9 +57,127 @@ func TestExternalSecretMappingValidate(t *testing.T) {
 		expected field.ErrorList
 	}{
 		{
-			name:     "empty is valid",
-			seed:     &ExternalSecretMapping{},
+			name: "empty is not valid",
+			seed: &ExternalSecretMapping{},
+			expected: field.ErrorList{
+				field.Required(field.NewPath("metadata", "ownerReferences"), "must be owned by an ExternalSecret"),
+			},
+		},
+		{
+			name: "valid",
+			seed: &ExternalSecretMapping{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-secret",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion:         "external-secrets.io/v1beta1",
+							Kind:               "ExternalSecret",
+							Name:               "my-secret",
+							UID:                types.UID("37e9ef98-6946-4252-a345-7efdf387ea3c"),
+							Controller:         pointer.Bool(true),
+							BlockOwnerDeletion: pointer.Bool(true),
+						},
+					},
+				},
+			},
 			expected: field.ErrorList{},
+		},
+		{
+			name: "wrong owner kind",
+			seed: &ExternalSecretMapping{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-secret",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion:         "external-secrets.io/v1beta1",
+							Kind:               "SecretStore",
+							Name:               "my-secret",
+							UID:                types.UID("37e9ef98-6946-4252-a345-7efdf387ea3c"),
+							Controller:         pointer.Bool(true),
+							BlockOwnerDeletion: pointer.Bool(true),
+						},
+					},
+				},
+			},
+			expected: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "ownerReferences").Index(0), []metav1.OwnerReference{
+					{
+						APIVersion:         "external-secrets.io/v1beta1",
+						Kind:               "SecretStore",
+						Name:               "my-secret",
+						UID:                types.UID("37e9ef98-6946-4252-a345-7efdf387ea3c"),
+						Controller:         pointer.Bool(true),
+						BlockOwnerDeletion: pointer.Bool(true),
+					},
+				}, "must be owned by an ExternalSecret"),
+			},
+		},
+		{
+			name: "too many owner refs",
+			seed: &ExternalSecretMapping{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-secret",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion:         "external-secrets.io/v1beta1",
+							Kind:               "ExternalSecret",
+							Name:               "my-secret",
+							UID:                types.UID("37e9ef98-6946-4252-a345-7efdf387ea3c"),
+							Controller:         pointer.Bool(true),
+							BlockOwnerDeletion: pointer.Bool(true),
+						},
+						{
+							APIVersion:         "external-secrets.io/v1beta1",
+							Kind:               "ExternalSecret",
+							Name:               "my-secret",
+							UID:                types.UID("37e9ef98-6946-4252-a345-7efdf387ea3c"),
+							Controller:         pointer.Bool(true),
+							BlockOwnerDeletion: pointer.Bool(true),
+						},
+					},
+				},
+			},
+			expected: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "ownerReferences"), []metav1.OwnerReference{
+					{
+						APIVersion:         "external-secrets.io/v1beta1",
+						Kind:               "ExternalSecret",
+						Name:               "my-secret",
+						UID:                types.UID("37e9ef98-6946-4252-a345-7efdf387ea3c"),
+						Controller:         pointer.Bool(true),
+						BlockOwnerDeletion: pointer.Bool(true),
+					},
+					{
+						APIVersion:         "external-secrets.io/v1beta1",
+						Kind:               "ExternalSecret",
+						Name:               "my-secret",
+						UID:                types.UID("37e9ef98-6946-4252-a345-7efdf387ea3c"),
+						Controller:         pointer.Bool(true),
+						BlockOwnerDeletion: pointer.Bool(true),
+					},
+				}, "must be owned by exactly one ExternalSecret"),
+			},
+		},
+		{
+			name: "owner by resource with different name",
+			seed: &ExternalSecretMapping{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-secret",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion:         "external-secrets.io/v1beta1",
+							Kind:               "ExternalSecret",
+							Name:               "some-other-secret",
+							UID:                types.UID("37e9ef98-6946-4252-a345-7efdf387ea3c"),
+							Controller:         pointer.Bool(true),
+							BlockOwnerDeletion: pointer.Bool(true),
+						},
+					},
+				},
+			},
+			expected: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "ownerReferences").Index(0).Child("name"), "some-other-secret", "owner name must match resource name"),
+			},
 		},
 	}
 
