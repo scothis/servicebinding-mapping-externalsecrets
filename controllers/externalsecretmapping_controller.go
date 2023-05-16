@@ -26,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	externalsecretsv1beta1 "github.com/servicebinding/mapping-externalsecrets/apis/thirdparty/externalsecrets/v1beta1"
 	mappingv1alpha1 "github.com/servicebinding/mapping-externalsecrets/apis/v1alpha1"
@@ -85,7 +84,7 @@ func ExternalSecretMappingSyncReconciler() *reconcilers.SyncReconciler[*mappingv
 		},
 
 		Setup: func(ctx context.Context, mgr controllerruntime.Manager, bldr *builder.Builder) error {
-			bldr.Watches(&source.Kind{Type: &externalsecretsv1beta1.ExternalSecret{}}, reconcilers.EnqueueTracked(ctx, &externalsecretsv1beta1.ExternalSecret{}))
+			bldr.Watches(&externalsecretsv1beta1.ExternalSecret{}, reconcilers.EnqueueTracked(ctx))
 
 			return nil
 		},
