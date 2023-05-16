@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 func (r *ExternalSecretMapping) SetupWebhookWithManager(mgr ctrl.Manager) error {
@@ -42,21 +43,21 @@ func (r *ExternalSecretMapping) Default() {
 var _ webhook.Validator = &ExternalSecretMapping{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *ExternalSecretMapping) ValidateCreate() error {
+func (r *ExternalSecretMapping) ValidateCreate() (admission.Warnings, error) {
 	r.Default()
-	return r.validate().ToAggregate()
+	return nil, r.validate().ToAggregate()
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *ExternalSecretMapping) ValidateUpdate(old runtime.Object) error {
+func (r *ExternalSecretMapping) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
 	// TODO(user): check for immutable fields, if any
 	r.Default()
-	return r.validate().ToAggregate()
+	return nil, r.validate().ToAggregate()
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *ExternalSecretMapping) ValidateDelete() error {
-	return nil
+func (r *ExternalSecretMapping) ValidateDelete() (admission.Warnings, error) {
+	return nil, nil
 }
 
 func (r *ExternalSecretMapping) validate() field.ErrorList {

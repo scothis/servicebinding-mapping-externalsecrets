@@ -60,7 +60,7 @@ func ExternalSecretExternalSecretMappingChildReconciler() *reconcilers.ChildReco
 			current.Labels = desired.Labels
 			current.Spec = desired.Spec
 		},
-		ReflectChildStatusOnParent: func(parent *externalsecretsv1beta1.ExternalSecret, child *mappingv1alpha1.ExternalSecretMapping, err error) {
+		ReflectChildStatusOnParent: func(ctx context.Context, parent *externalsecretsv1beta1.ExternalSecret, child *mappingv1alpha1.ExternalSecretMapping, err error) {
 			// status updates are skipped, nothing to do
 		},
 	}
