@@ -1,3 +1,7 @@
+# This repo is archived. Provisioned service support is available directly on an ExternalSecret, no mapping required.
+
+
+
 <img src="https://avatars.githubusercontent.com/u/64096231" align="right" />
 
 # Service Binding Mapping for External Secrets <!-- omit in toc -->
